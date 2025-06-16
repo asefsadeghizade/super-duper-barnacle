@@ -1,48 +1,82 @@
-// LOLIN S2 Mini Configurable Sine Wave Generator
+// LOLIN S2 Mini – Sine + 2nd Harmonic Generator with Independent Amplitudes
 
-const int dacPin = 17;                 // DAC1 output pin on ESP32-S2 mini
-const int sineTableSize = 100;         // Number of samples per sine wave period
-uint8_t sineTable[sineTableSize];      // Lookup table for sine wave values (0–255)
-int tableIndex = 0;
+#include <Arduino.h>
 
-volatile uint8_t lastVal = 0;          // Last DAC value output (used for serial print)
+const int dacPin         = 17;           // DAC1 on ESP32-S2
+const int sineTableSize = 100;           // samples per cycle
+uint8_t sineTable[sineTableSize];        // 0–255 lookup
+volatile uint8_t lastVal = 0;            // for Serial plot
+
 hw_timer_t* timer = NULL;
 
-// === Change this variable to adjust output frequency ===
-const float outputFrequency = 15.0;   // in Hz
+// --- User parameters ---
+const float outputFrequency      = 15.0;  // fundamental in Hz (10–130)
+const float ampFundamental       = 1.0;   // relative amplitude of fundamental (0.0–1.0)
+const float ampSecondHarmonic    = 0.0;   // relative amplitude of 2nd harmonic (0.0–1.0)
+
+// --- Phase accumulators (in table‐index units) ---
+volatile int phaseFund = 0;
+volatile int phase2nd  = 0;
+
+// Calculate timer interval in microseconds for given frequency
+uint32_t calcTimerInterval() {
+  float periodPerCycle = 1e6 / outputFrequency;     // µs per sine cycle
+  return uint32_t(periodPerCycle / sineTableSize + 0.5);
+}
 
 void IRAM_ATTR onTimer() {
-  uint8_t val = sineTable[tableIndex];
-  dacWrite(dacPin, val);
-  tableIndex = (tableIndex + 1) % sineTableSize;
-  lastVal = val;
+  // 1) Lookup table values
+  int idx1 = phaseFund;
+  int idx2 = phase2nd;
+  uint8_t v1 = sineTable[idx1];
+  uint8_t v2 = sineTable[idx2];
+
+  // 2) Convert to -1.0→+1.0 floats
+  float n1 = (v1 - 127.5f) / 127.5f;
+  float n2 = (v2 - 127.5f) / 127.5f;
+
+  // 3) Weight & sum
+  float sum = ampFundamental * n1 + ampSecondHarmonic * n2;
+  float norm = ampFundamental + ampSecondHarmonic;
+  if (norm > 0) sum /= norm;     // re-normalize to -1..1
+
+  // 4) Convert back to 0–255
+  uint8_t out = uint8_t(127.5f + 127.5f * sum);
+  dacWrite(dacPin, out);
+  lastVal = out;
+
+  // 5) Advance phases
+  phaseFund = (phaseFund + 1) % sineTableSize;
+  phase2nd  = (phase2nd  + 2) % sineTableSize;  // 2× speed for 2nd harmonic
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
 
-  // Populate sine table
+  // Build sine lookup table
   for (int i = 0; i < sineTableSize; i++) {
     float angle = 2 * PI * i / sineTableSize;
-    sineTable[i] = (uint8_t)(127.5 + 127.5 * sin(angle));
+    sineTable[i] = uint8_t(127.5f + 127.5f * sinf(angle));
   }
 
-  // Calculate timer period from desired output frequency
-  float periodMicroseconds = (1e6 / outputFrequency) / sineTableSize;
-
-  timer = timerBegin(0, 80, true); // prescaler = 80 → 1 tick = 1 μs
+  // Configure timer
+  timer = timerBegin(0, 80, true);  // prescaler=80 → 1 tick=1µs
   timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, (uint32_t)periodMicroseconds, true); // trigger every x μs
+  uint32_t tUs = calcTimerInterval();
+  timerAlarmWrite(timer, tUs, true);
   timerAlarmEnable(timer);
+
+  Serial.printf("Gen: %.1fHz fund @amp %.2f + 2nd @amp %.2f\n",
+                outputFrequency, ampFundamental, ampSecondHarmonic);
+  Serial.printf("Timer interval: %u µs\n", tUs);
 }
 
 void loop() {
-  static uint32_t lastPrintTime = 0;
-  uint32_t now = millis();
-
-  if (now - lastPrintTime >= 1) {
-    lastPrintTime = now;
-    Serial.println(lastVal);  // for Serial Plotter
+  // Print last DAC value for plot
+  static uint32_t last = 0;
+  if (millis() - last >= 20) {
+    last = millis();
+    Serial.println(lastVal);
   }
 }
