@@ -1,67 +1,56 @@
-const int adcPin = 5;         // ADC input pin (change if needed)
-const int sampleRate = 2000;  // ADC sample rate in Hz
-const int sampleIntervalUs = 1000000 / sampleRate;
+#include <Arduino.h>
+#include <arduinoFFT.h>
 
-volatile int lastAdcValue = 0;
-volatile unsigned long lastCrossTime = 0;
-volatile unsigned long periodUs = 0;
-volatile bool newFreqAvailable = false;
+const uint16_t SAMPLE_RATE = 1024;    // Hz (covers up to 512 Hz)
+const uint16_t FFT_SIZE    = 1024;    // power of two
 
-unsigned long lastPrintTime = 0;
-float frequency = 0.0;
-int amplitude = 0;
+const uint8_t  ADC_PIN     = 5;       // GPIO5
+const double   V_REF       = 3.3;
 
-void IRAM_ATTR onTimer() {
-  int adcValue = analogRead(adcPin);
+double vReal[FFT_SIZE];
+double vImag[FFT_SIZE];
 
-  // Detect positive zero crossing: last sample < mid, current sample >= mid
-  const int mid = 2048; // for 12-bit ADC (0-4095), midpoint ~2048
-
-  if (lastAdcValue < mid && adcValue >= mid) {
-    unsigned long now = micros();
-    if (lastCrossTime > 0) {
-      periodUs = now - lastCrossTime;
-      newFreqAvailable = true;
-    }
-    lastCrossTime = now;
-  }
-
-  lastAdcValue = adcValue;
-}
-
-hw_timer_t* timer = NULL;
+// Specify template argument <double>
+ArduinoFFT<double> FFT(vReal, vImag, FFT_SIZE, SAMPLE_RATE);
 
 void setup() {
   Serial.begin(115200);
   analogReadResolution(12);
-  analogSetAttenuation(ADC_11db); // Wider voltage range
-
-  // Configure timer for sampling
-  timer = timerBegin(0, 80, true); // 80 MHz clock, prescaler=80 → 1 MHz timer (1 us ticks)
-  timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, sampleIntervalUs, true);
-  timerAlarmEnable(timer);
+  analogSetAttenuation(ADC_11db);
 }
 
 void loop() {
-  if (newFreqAvailable) {
-    noInterrupts();
-    unsigned long p = periodUs;
-    newFreqAvailable = false;
-    interrupts();
+  // 1) Acquire samples at SAMPLE_RATE
+  unsigned long interval = 1000000UL / SAMPLE_RATE;
+  unsigned long prev = micros();
+  for (uint16_t i = 0; i < FFT_SIZE; i++) {
+    while (micros() - prev < interval);
+    prev += interval;
+    int raw = analogRead(ADC_PIN);
+    vReal[i] = ((double)raw - 2048.0) / 2048.0; // normalize ±1
+    vImag[i] = 0.0;
+  }
 
-    if (p > 0) {
-      frequency = 1000000.0 / p;
-    } else {
-      frequency = 0;
+  // 2) Window, FFT, Magnitude
+  FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+  FFT.compute(FFT_FORWARD);
+  FFT.complexToMagnitude();
+
+  // 3) Find peak bin (skip DC bin 0)
+  uint16_t peakBin = 1;
+  double   peakMag = vReal[1];
+  for (uint16_t b = 2; b < FFT_SIZE/2; b++) {
+    if (vReal[b] > peakMag) {
+      peakMag = vReal[b];
+      peakBin = b;
     }
   }
 
-  // Print every 500 ms
-  if (millis() - lastPrintTime > 500) {
-    lastPrintTime = millis();
-    Serial.print("Frequency: ");
-    Serial.print(frequency, 2);
-    Serial.println(" Hz");
-  }
+  // 4) Convert bin to frequency & amplitude
+  double freq = peakBin * (double)SAMPLE_RATE / FFT_SIZE;  
+  double amp  = peakMag * (V_REF/2.0);
+
+  Serial.printf("Freq: %.1f Hz   Amp: %.3f V\n", freq, amp);
+
+  delay(50);
 }
