@@ -1,0 +1,15 @@
+# Arduino build artifacts
+*.bin
+*.elf
+*.hex
+*.eep
+*.map
+.build/
+
+# OS temp files
+.DS_Store
+Thumbs.db
+
+# VSCode / PlatformIO
+.vscode/
+pioenvs/
